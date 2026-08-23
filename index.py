@@ -238,14 +238,18 @@ async def publish_family_info_panel(guild: discord.Guild) -> bool:
         console_log(f"Family info channel is not text channel: {type(channel)!r}")
         return False
 
+    # Файла картинки может не быть (например, папку assets не задеплоили) —
+    # тогда карточка публикуется с фирменным баннером вместо вложения.
     banner_file = welcome_banner_file()
     if banner_file is None:
-        console_log(f"Family info panel skipped: banner file missing at {WELCOME_BANNER_PATH}")
-        return False
+        console_log(f"Family info panel: banner file missing at {WELCOME_BANNER_PATH}, using brand banner")
 
+    # file=None discord.py трактует как настоящее вложение, поэтому параметр
+    # передаётся только когда файл есть.
+    extra = {"file": banner_file} if banner_file is not None else {}
     try:
         await cleanup_bot_messages(channel)
-        message = await channel.send(view=FamilyInfoCard(), file=banner_file)
+        message = await channel.send(view=FamilyInfoCard(), **extra)
         panel_store[get_project_panel_key(FAMILY_INFO_PANEL_KEY, guild.id)] = {
             "messageId": message.id,
             "channelId": channel.id,

@@ -42,7 +42,14 @@ def brand_gallery() -> discord.ui.MediaGallery:
 
 
 def welcome_gallery() -> discord.ui.MediaGallery:
-    return discord.ui.MediaGallery(discord.MediaGalleryItem(WELCOME_BANNER_ATTACHMENT_URL))
+    """Картинка приветствия: вложением, а при его отсутствии — баннером семьи.
+
+    Ссылка на вложение работает только вместе с самим файлом. Если файла нет
+    (например, папку assets забыли задеплоить), карточка всё равно должна
+    публиковаться — просто с фирменным баннером вместо welcome-картинки.
+    """
+    url = WELCOME_BANNER_ATTACHMENT_URL if WELCOME_BANNER_PATH.exists() else FAMILY_BRAND_BANNER_URL
+    return discord.ui.MediaGallery(discord.MediaGalleryItem(url))
 
 
 class FamilyInfoCard(discord.ui.LayoutView):

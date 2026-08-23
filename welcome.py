@@ -67,23 +67,12 @@ async def resolve_welcome_channel(guild: discord.Guild) -> discord.TextChannel |
 
 
 async def send_welcome_dm(member: discord.Member) -> None:
+    # Без файла карточка всё равно отправляется: welcome_gallery() сам подставит
+    # фирменный баннер. file=None передавать нельзя — discord.py примет его за вложение.
     banner_file = welcome_banner_file()
+    extra = {"file": banner_file} if banner_file is not None else {}
     try:
-        if banner_file is not None:
-            await member.send(view=WelcomeDirectMessageCard(member.guild), file=banner_file)
-        else:
-            await member.send(
-                embed=make_embed(
-                    title="Добро пожаловать в ASIXEZ",
-                    description=(
-                        f"Заявка на вступление: <#{FAMQ_PANEL_CHANNEL_ID}>\n"
-                        "Промокод: **`/promo ASIX`**\n"
-                        "YouTube: https://www.youtube.com/@asixezzz"
-                    ),
-                    color=COLOR_SOFT,
-                    timestamp=datetime.now(timezone.utc),
-                )
-            )
+        await member.send(view=WelcomeDirectMessageCard(member.guild), **extra)
     except Exception:
         # Личные сообщения могут быть закрыты — вход на сервер из-за этого падать не должен.
         pass

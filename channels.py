@@ -83,11 +83,11 @@ async def send_dm_or_fallback(
     member = guild.get_member(user_id)
     user: discord.abc.User = member if member is not None else await bot.fetch_user(user_id)
 
+    # file=None discord.py принимает за настоящее вложение и падает,
+    # поэтому параметр передаётся только когда файл действительно есть.
+    extra = {"file": file} if file is not None else {}
     try:
-        if file is not None:
-            await user.send(embed=embed, file=file)
-        else:
-            await user.send(embed=embed)
+        await user.send(embed=embed, **extra)
         return
     except Exception:
         pass
@@ -105,13 +105,15 @@ async def send_dm_or_fallback(
         return
 
     # discord.File — одноразовый поток, для второй отправки нужен новый объект.
-    retry_file = discord.File(file.fp.name, filename=file.filename) if file is not None and hasattr(file.fp, "name") else None
+    retry_extra = {}
+    if file is not None and hasattr(file.fp, "name"):
+        retry_extra["file"] = discord.File(file.fp.name, filename=file.filename)
     try:
         await fallback.send(
             content=f"<@{user_id}>",
             embed=embed,
-            file=retry_file,
             allowed_mentions=discord.AllowedMentions(users=True),
+            **retry_extra,
         )
     except Exception:
         pass
