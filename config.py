@@ -171,6 +171,12 @@ COLOR_PANEL = 0x1E1F22
 COLOR_LOG = 0x4A4E57
 COLOR_LOG_APPLICATION = 0x41454D
 
+# --- Метка сборки ---
+# Показывается в сообщении о перезапуске. Нужна, чтобы одним взглядом понять,
+# какой код реально крутится на хосте, а не гадать, доехал ли деплой.
+# Обновляется при каждом изменении кода.
+BUILD_TAG = "2026-08-23.2"
+
 # --- Список гильдий ---
 PROJECT_GUILD_IDS = (FAMQ_GUILD_ID, FEDRU_GUILD_ID)
 GUILD_SCOPES = [discord.Object(id=guild_id) for guild_id in PROJECT_GUILD_IDS]

@@ -406,7 +406,7 @@ def build_usi_embed(
 # --- Перезапуск ---
 
 def build_restart_status_embed(project_name: str, issues: list[str]) -> discord.Embed:
-    return make_embed(
+    embed = make_embed(
         title=f"{EMOJI_ACCEPT_TEXT} {project_name} Bot Restart",
         description=(
             "✅ Бот перезапущен и работает стабильно."
@@ -416,6 +416,9 @@ def build_restart_status_embed(project_name: str, issues: list[str]) -> discord.
         color=COLOR_SOFT if not issues else COLOR_MUTED,
         timestamp=datetime.now(timezone.utc),
     )
+    # Метка сборки сразу отвечает на вопрос «доехал ли деплой».
+    embed.set_footer(text=f"Сборка {BUILD_TAG} • {format_log_time_msk()}")
+    return embed
 
 
 def build_restart_report_embed(issues: list[str]) -> discord.Embed:
