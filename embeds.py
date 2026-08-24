@@ -405,7 +405,13 @@ def build_usi_embed(
 
 # --- Перезапуск ---
 
-def build_restart_status_embed(project_name: str, issues: list[str]) -> discord.Embed:
+def build_restart_status_embed(
+    project_name: str,
+    issues: list[str],
+    *,
+    instance_id: str = "",
+    bot_user_id: int | None = None,
+) -> discord.Embed:
     embed = make_embed(
         title=f"{EMOJI_ACCEPT_TEXT} {project_name} Bot Restart",
         description=(
@@ -416,8 +422,16 @@ def build_restart_status_embed(project_name: str, issues: list[str]) -> discord.
         color=COLOR_SOFT if not issues else COLOR_MUTED,
         timestamp=datetime.now(timezone.utc),
     )
-    # Метка сборки сразу отвечает на вопрос «доехал ли деплой».
-    embed.set_footer(text=f"Сборка {BUILD_TAG} • {format_log_time_msk()}")
+    # Подпись отвечает сразу на три вопроса: доехал ли деплой, сколько процессов
+    # бота запущено и один ли это бот. Два таких сообщения с разными
+    # идентификаторами означают две работающие копии — отсюда и дубли в каналах.
+    signature = [f"Сборка {BUILD_TAG}"]
+    if instance_id:
+        signature.append(f"инстанс {instance_id}")
+    if bot_user_id:
+        signature.append(f"бот {bot_user_id}")
+    signature.append(format_log_time_msk())
+    embed.set_footer(text=" • ".join(signature))
     return embed
 
 

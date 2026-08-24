@@ -29,7 +29,7 @@ from applications_flow import (
     create_or_update_main_panel,
     refresh_pending_application_messages,
 )
-from botcore import bot, console_log
+from botcore import INSTANCE_ID, bot, console_log
 from channels import cleanup_bot_messages, delete_message_safely
 from components import FamilyInfoCard, welcome_banner_file
 from config import *
@@ -198,7 +198,14 @@ async def send_restart_status(guild: discord.Guild, setup_issues: list[str] | No
         return
 
     issues = await collect_restart_issues(guild, setup_issues)
-    message = await channel.send(embed=build_restart_status_embed(project["project_name"], issues))
+    message = await channel.send(
+        embed=build_restart_status_embed(
+            project["project_name"],
+            issues,
+            instance_id=INSTANCE_ID,
+            bot_user_id=bot.user.id if bot.user else None,
+        )
+    )
     if not issues or not isinstance(channel, discord.TextChannel):
         return
 

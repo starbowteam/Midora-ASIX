@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sys
+import uuid
 
 import discord
 from discord.ext import commands
@@ -16,6 +17,11 @@ from logging_setup import setup_logging
 
 
 logger = setup_logging(BASE_DIR)
+
+# Короткий идентификатор запуска. Каждый процесс получает свой, поэтому по
+# сообщениям в Discord сразу видно, сколько копий бота реально работает:
+# два сообщения о перезапуске с разными идентификаторами — два процесса.
+INSTANCE_ID = uuid.uuid4().hex[:6]
 
 
 def console_log(message: str) -> None:
