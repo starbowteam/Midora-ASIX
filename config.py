@@ -137,6 +137,11 @@ WELCOME_BANNER_FILENAME = "welcome_banner.jpg"
 WELCOME_BANNER_PATH = ASSETS_DIR / WELCOME_BANNER_FILENAME
 WELCOME_BANNER_ATTACHMENT_URL = f"attachment://{WELCOME_BANNER_FILENAME}"
 
+# Квадратная картинка в углу сообщений о входе и выходе.
+WELCOME_ICON_FILENAME = "welcome_icon.jpg"
+WELCOME_ICON_PATH = ASSETS_DIR / WELCOME_ICON_FILENAME
+WELCOME_ICON_ATTACHMENT_URL = f"attachment://{WELCOME_ICON_FILENAME}"
+
 # --- Константы серверов ---
 FAMQ_SERVER_DETROIT = "detroit"
 FAMQ_SERVER_DENVER = "denver"
@@ -175,7 +180,7 @@ COLOR_LOG_APPLICATION = 0x41454D
 # Показывается в сообщении о перезапуске. Нужна, чтобы одним взглядом понять,
 # какой код реально крутится на хосте, а не гадать, доехал ли деплой.
 # Обновляется при каждом изменении кода.
-BUILD_TAG = "2026-08-23.2"
+BUILD_TAG = "2026-08-24.1"
 
 # --- Список гильдий ---
 PROJECT_GUILD_IDS = (FAMQ_GUILD_ID, FEDRU_GUILD_ID)

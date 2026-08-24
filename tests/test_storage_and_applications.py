@@ -244,5 +244,77 @@ class BannerFallbackTests(unittest.TestCase):
             components.WELCOME_BANNER_PATH = original
 
 
+class WelcomeNoticeTests(unittest.TestCase):
+    """Сообщения о входе/выходе: без дублей и с картинкой справа."""
+
+    def setUp(self) -> None:
+        import welcome
+
+        welcome._recent_notices.clear()
+
+    def test_repeated_event_is_skipped(self) -> None:
+        import welcome
+
+        self.assertTrue(welcome.mark_notice_sent(1, 100, "join"))
+        self.assertFalse(welcome.mark_notice_sent(1, 100, "join"), "повтор должен отсеиваться")
+
+    def test_join_and_leave_are_tracked_separately(self) -> None:
+        import welcome
+
+        self.assertTrue(welcome.mark_notice_sent(1, 100, "join"))
+        self.assertTrue(welcome.mark_notice_sent(1, 100, "leave"))
+        self.assertTrue(welcome.mark_notice_sent(1, 101, "join"))
+
+    def test_old_entries_stop_blocking(self) -> None:
+        import welcome
+
+        self.assertTrue(welcome.mark_notice_sent(1, 100, "join"))
+        # Сдвигаем отметку в прошлое за пределы окна дедупликации.
+        key = (1, 100, "join")
+        welcome._recent_notices[key] -= welcome.NOTICE_DEDUP_WINDOW_SECONDS + 1
+        self.assertTrue(welcome.mark_notice_sent(1, 100, "join"))
+
+    def test_notice_embed_has_thumbnail_on_the_right(self) -> None:
+        import config
+        import welcome
+
+        embed = welcome.build_member_notice_embed(FakeMember(), joined=True)
+        self.assertTrue(embed.thumbnail.url, "у сообщения должна быть картинка справа")
+        if config.WELCOME_ICON_PATH.exists():
+            self.assertEqual(embed.thumbnail.url, config.WELCOME_ICON_ATTACHMENT_URL)
+
+    def test_leave_embed_differs_from_join(self) -> None:
+        import welcome
+
+        join = welcome.build_member_notice_embed(FakeMember(), joined=True)
+        leave = welcome.build_member_notice_embed(FakeMember(), joined=False)
+        self.assertIn("зашёл на сервер", join.description)
+        self.assertIn("покинул сервер", leave.description)
+        self.assertNotEqual(join.colour, leave.colour)
+
+
+class FakeAsset:
+    url = "https://example.invalid/avatar.png"
+
+
+class FakeGuild:
+    id = 1466147160763666472
+    member_count = 217
+    members: list = []
+
+
+class FakeMember:
+    """Минимальная замена discord.Member для проверки сборки эмбеда."""
+
+    id = 1039133630036975616
+    bot = False
+    guild = FakeGuild()
+    mention = "<@1039133630036975616>"
+    display_avatar = FakeAsset()
+
+    def __str__(self) -> str:
+        return "versize52"
+
+
 if __name__ == "__main__":
     unittest.main()

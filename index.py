@@ -744,7 +744,20 @@ async def on_ready() -> None:
     startup_done = True
 
 
+listeners_registered = False
+
+
 def register_listeners() -> None:
+    """Подписывает модули на события Discord — ровно один раз.
+
+    Повторный вызов раньше добавлял вторую копию каждого обработчика, и бот
+    отправлял каждое сообщение о входе или выходе дважды.
+    """
+    global listeners_registered
+    if listeners_registered:
+        console_log("Listeners are already registered, skipping duplicate registration")
+        return
+
     logs.register_listeners()
     security.register_listeners()
     voice.register_listeners()
@@ -753,6 +766,7 @@ def register_listeners() -> None:
     bot.add_listener(on_member_remove_main, "on_member_remove")
     bot.add_listener(on_member_ban_main, "on_member_ban")
     bot.add_listener(on_message_main, "on_message")
+    listeners_registered = True
 
 
 register_listeners()
