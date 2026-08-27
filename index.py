@@ -747,7 +747,12 @@ async def on_ready() -> None:
         console_log(f"{project_name} resolved application channels cleaned: {cleaned_resolved}")
         console_log(f"{project_name} pending applications refreshed: {refreshed_applications}")
 
-    console_log(f"Logged in as {bot.user}")
+    # Строка намеренно подробная: если в логах хостинга она встречается дважды
+    # с разными instance, значит запущены две копии бота — отсюда дубли сообщений.
+    console_log(
+        f"Logged in as {bot.user} (id {bot.user.id if bot.user else '?'}) | "
+        f"build {BUILD_TAG} | instance {INSTANCE_ID} | pid {os.getpid()}"
+    )
     startup_done = True
 
 
@@ -780,6 +785,7 @@ register_listeners()
 
 
 def main() -> None:
+    console_log(f"Starting bot: build {BUILD_TAG} | instance {INSTANCE_ID} | pid {os.getpid()}")
     if not TOKEN:
         raise RuntimeError("BOT_TOKEN или FAMQ_BOT_TOKEN не задан в .env")
     bot.run(TOKEN)
