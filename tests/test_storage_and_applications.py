@@ -316,5 +316,32 @@ class FakeMember:
         return "versize52"
 
 
+class LogBatchingTests(unittest.IsolatedAsyncioTestCase):
+    """Логи уходят пачками, иначе активный сервер упирается в rate limit Discord."""
+
+    async def test_many_events_collapse_into_few_requests(self) -> None:
+        import discord
+
+        import logs
+
+        requests: list[int] = []
+
+        class FakeChannel(discord.TextChannel):
+            def __init__(self, channel_id: int) -> None:
+                self.id = channel_id
+
+            async def send(self, **kwargs) -> None:
+                requests.append(len(kwargs.get("embeds", [])))
+
+        channel = FakeChannel(1466322279440060572)
+        for index in range(25):
+            logs.enqueue_log_embed(channel, discord.Embed(description=f"событие {index}"))
+        await asyncio.sleep(3.0)
+
+        self.assertEqual(sum(requests), 25, "ни одна запись не должна потеряться")
+        self.assertLessEqual(len(requests), 4, "25 событий должны уложиться в несколько запросов")
+        self.assertTrue(all(count <= logs.LOG_EMBEDS_PER_MESSAGE for count in requests))
+
+
 if __name__ == "__main__":
     unittest.main()

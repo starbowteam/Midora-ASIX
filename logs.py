@@ -6,11 +6,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 import discord
 
-from botcore import bot
+from botcore import bot, console_log
 from config import *
 from embeds import build_log_line_embed
 from formatting import (
@@ -104,6 +105,78 @@ async def detect_leave_reason(guild: discord.Guild, user_id: int) -> tuple[str, 
     return "left", None, None
 
 
+# --- Очередь отправки ---
+#
+# Каждое событие сервера — это отдельный POST в Discord, и на активном сервере
+# канал логов быстро упирается в rate limit (429). Поэтому записи копятся в
+# очереди, а фоновая задача отправляет их пачками: Discord принимает до 10
+# эмбедов в одном сообщении, то есть запросов становится почти в 10 раз меньше.
+
+LOG_BATCH_DELAY_SECONDS = 1.5
+LOG_EMBEDS_PER_MESSAGE = 10
+LOG_QUEUE_MAX_SIZE = 2000
+
+_log_queue: asyncio.Queue | None = None
+_log_worker: asyncio.Task | None = None
+
+
+def _ensure_log_worker() -> asyncio.Queue | None:
+    global _log_queue, _log_worker
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+    if _log_queue is None:
+        _log_queue = asyncio.Queue(maxsize=LOG_QUEUE_MAX_SIZE)
+    if _log_worker is None or _log_worker.done():
+        _log_worker = asyncio.create_task(_drain_log_queue())
+    return _log_queue
+
+
+def enqueue_log_embed(channel: discord.TextChannel, embed: discord.Embed) -> None:
+    queue = _ensure_log_worker()
+    if queue is None:
+        return
+    try:
+        queue.put_nowait((channel, embed))
+    except asyncio.QueueFull:
+        # Переполнение возможно только при аварийном потоке событий; теряем
+        # запись, но не блокируем обработчик события.
+        console_log("Log queue is full, dropping a log entry")
+
+
+async def _drain_log_queue() -> None:
+    assert _log_queue is not None
+    while True:
+        try:
+            channel, embed = await _log_queue.get()
+            batches: dict[int, tuple[discord.TextChannel, list[discord.Embed]]] = {
+                channel.id: (channel, [embed])
+            }
+
+            # Небольшая пауза даёт соседним событиям попасть в ту же пачку.
+            await asyncio.sleep(LOG_BATCH_DELAY_SECONDS)
+            while not _log_queue.empty():
+                next_channel, next_embed = _log_queue.get_nowait()
+                _, embeds = batches.setdefault(next_channel.id, (next_channel, []))
+                embeds.append(next_embed)
+
+            for target_channel, embeds in batches.values():
+                for start in range(0, len(embeds), LOG_EMBEDS_PER_MESSAGE):
+                    chunk = embeds[start : start + LOG_EMBEDS_PER_MESSAGE]
+                    try:
+                        await target_channel.send(embeds=chunk)
+                    except Exception as error:
+                        console_log(f"Failed to send log batch to {target_channel.id}: {error}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            console_log(f"Log queue worker error: {error}")
+            await asyncio.sleep(1)
+
+
+
 # --- Отправка ---
 
 async def send_activity_log(
@@ -122,22 +195,20 @@ async def send_activity_log(
     channel = await resolve_activity_log_channel(guild)
     if channel is None:
         return
-    try:
-        await channel.send(
-            embed=build_log_line_embed(
-                title=title,
-                description=description,
-                fields=fields,
-                color=color,
-                author_name=author_name,
-                author_icon_url=author_icon_url,
-                footer_parts=footer_parts,
-                thumbnail_url=thumbnail_url,
-                image_url=image_url,
-            )
-        )
-    except Exception:
-        pass
+    enqueue_log_embed(
+        channel,
+        build_log_line_embed(
+            title=title,
+            description=description,
+            fields=fields,
+            color=color,
+            author_name=author_name,
+            author_icon_url=author_icon_url,
+            footer_parts=footer_parts,
+            thumbnail_url=thumbnail_url,
+            image_url=image_url,
+        ),
+    )
 
 
 async def send_application_log(
@@ -156,20 +227,18 @@ async def send_application_log(
         return
     author_name = f"{actor} ({actor.id})" if actor is not None else None
     author_icon_url = safe_asset_url(getattr(actor, "display_avatar", None)) if actor is not None else None
-    try:
-        await channel.send(
-            embed=build_log_line_embed(
-                title=title,
-                description=description,
-                fields=fields,
-                color=color,
-                author_name=author_name,
-                author_icon_url=author_icon_url,
-                footer_parts=footer_parts or [format_log_time_msk()],
-            )
-        )
-    except Exception:
-        pass
+    enqueue_log_embed(
+        channel,
+        build_log_line_embed(
+            title=title,
+            description=description,
+            fields=fields,
+            color=color,
+            author_name=author_name,
+            author_icon_url=author_icon_url,
+            footer_parts=footer_parts or [format_log_time_msk()],
+        ),
+    )
 
 
 # --- Diff-хелперы ---
