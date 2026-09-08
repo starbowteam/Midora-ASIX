@@ -15,10 +15,11 @@ from applications import (
 from botcore import bot, console_log
 from channels import (
     cleanup_bot_messages,
-    delete_channel_later,
     delete_channel_now,
     delete_message_safely,
+    schedule_channel_deletion,
     send_dm_or_fallback,
+    spawn_background_task,
 )
 from components import brand_gallery, large_separator, small_separator
 from config import *
@@ -217,53 +218,63 @@ class ApplicationCard(discord.ui.LayoutView):
             buttons.append(button)
         return buttons
 
+    @staticmethod
+    async def _reply(interaction: discord.Interaction, text: str) -> None:
+        """Отвечает независимо от того, было ли взаимодействие уже отложено."""
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(text, ephemeral=True)
+            else:
+                await interaction.response.send_message(text, ephemeral=True)
+        except Exception as error:
+            console_log(f"Failed to answer interaction for application #{interaction.id}: {error!r}")
+
     async def _guard(self, interaction: discord.Interaction) -> dict[str, Any] | None:
+        # Состояние заявок живёт в памяти процесса, поэтому перечитывать файл
+        # на каждое нажатие не нужно: это лишний блокирующий ввод-вывод в цикле
+        # событий, из-за которого ответ не успевал уложиться в лимит Discord.
         member = interaction.user if isinstance(interaction.user, discord.Member) else None
-        reload_applications()
-        app = application_store["items"].get(str(self.app_id))
+        app = application_store.get("items", {}).get(str(self.app_id))
         if not app:
-            await interaction.response.send_message("Заявка не найдена.", ephemeral=True)
+            await self._reply(interaction, "Заявка не найдена.")
             return None
         if interaction.guild is None:
-            await interaction.response.send_message("Сервер не найден.", ephemeral=True)
+            await self._reply(interaction, "Сервер не найден.")
             return None
 
         if not can_manage_application(member, app.get("server", FAMQ_SERVER_DENVER), interaction.guild.id):
-            await interaction.response.send_message(
-                "Эта кнопка доступна только назначенным ролям этого сервера.", ephemeral=True
-            )
+            await self._reply(interaction, "Эта кнопка доступна только назначенным ролям этого сервера.")
             return None
 
         claimed_by = int(app.get("claimedBy") or 0)
         if claimed_by not in {0, interaction.user.id} and not is_privileged_recruiter(member):
-            await interaction.response.send_message(
-                f"Эта заявка уже закреплена за рекрутером <@{claimed_by}>.", ephemeral=True
-            )
+            await self._reply(interaction, f"Эта заявка уже закреплена за рекрутером <@{claimed_by}>.")
             return None
 
         return app
 
     async def _claim(self, interaction: discord.Interaction) -> dict[str, Any] | None:
         """Общая проверка для действий, меняющих статус заявки."""
-        reload_applications()
-        app = application_store["items"].get(str(self.app_id))
+        app = application_store.get("items", {}).get(str(self.app_id))
         if not app:
-            await interaction.response.send_message("Заявка не найдена.", ephemeral=True)
+            await self._reply(interaction, "Заявка не найдена.")
             return None
         if app.get("status") in {"accepted", "rejected"}:
-            await interaction.response.send_message("Заявка уже обработана.", ephemeral=True)
+            await self._reply(interaction, "Заявка уже обработана.")
             return None
         claimed_by = int(app.get("claimedBy") or 0)
         if claimed_by not in {0, interaction.user.id} and not is_privileged_recruiter(interaction.user):
-            await interaction.response.send_message(
-                f"Эта заявка уже закреплена за рекрутером <@{claimed_by}>.", ephemeral=True
-            )
+            await self._reply(interaction, f"Эта заявка уже закреплена за рекрутером <@{claimed_by}>.")
             return None
         app["claimedBy"] = interaction.user.id
         app["claimedAt"] = datetime.now(timezone.utc).isoformat()
         return app
 
     async def review_callback(self, interaction: discord.Interaction) -> None:
+        # Discord ждёт ответа на нажатие 3 секунды, иначе показывает
+        # «Взаимодействие не удалось». Дальше идут запросы к API, которые в
+        # этот лимит не укладываются, поэтому ответ откладываем сразу.
+        await interaction.response.defer(ephemeral=True)
         app = await self._guard(interaction)
         if app is None:
             return
@@ -288,9 +299,10 @@ class ApplicationCard(discord.ui.LayoutView):
             application=app,
             actor=interaction.user,
         )
-        await interaction.response.send_message(f"Заявка #{self.app_id} закреплена за вами.", ephemeral=True)
+        await interaction.followup.send(f"Заявка #{self.app_id} закреплена за вами.", ephemeral=True)
 
     async def call_callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
         app = await self._guard(interaction)
         if app is None:
             return
@@ -306,17 +318,20 @@ class ApplicationCard(discord.ui.LayoutView):
         project = get_project(int(app.get("guildId", interaction.guild.id if interaction.guild else 0)))
         interview_channel_ids = list(project.get("interview_channel_ids", [])) if project else []
         if not interview_channel_ids:
-            await interaction.response.send_message(
-                "Для этого проекта каналы обзвона пока не настроены.", ephemeral=True
-            )
+            await interaction.followup.send("Для этого проекта каналы обзвона пока не настроены.", ephemeral=True)
             return
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "Выберите канал для обзвона:",
             view=CallSelectView(self.app_id, interview_channel_ids),
             ephemeral=True,
         )
 
     async def accept_callback(self, interaction: discord.Interaction) -> None:
+        # Ответ откладывается первым же действием: раньше defer стоял после
+        # проверок и записи на диск, и при малейшей загрузке процесса не успевал
+        # в трёхсекундный лимит — взаимодействие падало, а вместе с ним
+        # пропадали выдача ролей и удаление канала заявки.
+        await interaction.response.defer(ephemeral=True)
         app = await self._guard(interaction)
         if app is None:
             return
@@ -330,7 +345,6 @@ class ApplicationCard(discord.ui.LayoutView):
             application_store["items"][str(self.app_id)] = app
             save_applications()
 
-        await interaction.response.defer(ephemeral=True)
         await lock_application_channel_to_recruiter(interaction.guild, app)
         accept_role_id = get_server_accept_role_id(
             app.get("server", FAMQ_SERVER_DENVER), int(app.get("guildId", interaction.guild.id))
@@ -401,7 +415,7 @@ class ApplicationCard(discord.ui.LayoutView):
         )
         await interaction.followup.send(f"Заявка #{self.app_id} принята. Канал будет удалён.", ephemeral=True)
         application_action_locks.pop(self.app_id, None)
-        asyncio.create_task(delete_channel_later(int(app["channelId"]), "Заявка FAMQ принята"))
+        schedule_channel_deletion(int(app.get("channelId") or 0), "Заявка FAMQ принята")
 
     async def reject_callback(self, interaction: discord.Interaction) -> None:
         app = await self._guard(interaction)
@@ -553,31 +567,32 @@ class RejectModal(discord.ui.Modal):
         self.add_item(self.reason)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        # Отклонение делает столько же обращений к API, сколько и принятие,
+        # поэтому ответ откладывается до всей остальной работы.
+        await interaction.response.defer(ephemeral=True)
         member = interaction.user if isinstance(interaction.user, discord.Member) else None
-        reload_applications()
-        app = application_store["items"].get(str(self.app_id))
+        app = application_store.get("items", {}).get(str(self.app_id))
         if not app:
-            await interaction.response.send_message("Заявка не найдена.", ephemeral=True)
+            await interaction.followup.send("Заявка не найдена.", ephemeral=True)
             return
         if interaction.guild is None or not can_manage_application(
             member, app.get("server", FAMQ_SERVER_DENVER), int(app.get("guildId", interaction.guild.id))
         ):
-            await interaction.response.send_message("Недостаточно прав.", ephemeral=True)
+            await interaction.followup.send("Недостаточно прав.", ephemeral=True)
             return
 
         reject_reason = str(self.reason).strip()
         async with get_application_lock(self.app_id):
-            reload_applications()
-            app = application_store["items"].get(str(self.app_id))
+            app = application_store.get("items", {}).get(str(self.app_id))
             if not app:
-                await interaction.response.send_message("Заявка не найдена.", ephemeral=True)
+                await interaction.followup.send("Заявка не найдена.", ephemeral=True)
                 return
             if app.get("status") in {"accepted", "rejected"}:
-                await interaction.response.send_message("Заявка уже обработана.", ephemeral=True)
+                await interaction.followup.send("Заявка уже обработана.", ephemeral=True)
                 return
             claimed_by = int(app.get("claimedBy") or 0)
             if claimed_by not in {0, interaction.user.id} and not is_privileged_recruiter(member):
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"Эта заявка уже закреплена за рекрутером <@{claimed_by}>.", ephemeral=True
                 )
                 return
@@ -626,11 +641,9 @@ class RejectModal(discord.ui.Modal):
             actor=interaction.user,
             extra_fields=[("Причина", reject_reason, False)],
         )
-        await interaction.response.send_message(
-            f"Заявка #{self.app_id} отклонена. Канал будет удалён.", ephemeral=True
-        )
+        await interaction.followup.send(f"Заявка #{self.app_id} отклонена. Канал будет удалён.", ephemeral=True)
         application_action_locks.pop(self.app_id, None)
-        asyncio.create_task(delete_channel_later(int(app["channelId"]), "Заявка FAMQ отклонена"))
+        schedule_channel_deletion(int(app.get("channelId") or 0), "Заявка FAMQ отклонена")
 
 
 class CallSelectView(discord.ui.View):
@@ -661,8 +674,7 @@ class CallSelectView(discord.ui.View):
             await interaction.response.send_message("Канал не выбран.", ephemeral=True)
             return
 
-        reload_applications()
-        app = application_store["items"].get(str(self.app_id))
+        app = application_store.get("items", {}).get(str(self.app_id))
         if not app:
             await interaction.response.send_message("Заявка не найдена.", ephemeral=True)
             return
@@ -681,6 +693,14 @@ class CallSelectView(discord.ui.View):
         selected_channel_id = int(selected.values[0])
         project = get_project(int(app.get("guildId", interaction.guild.id)))
         waiting_channel_id = int(project["waiting_channel_id"]) if project and project.get("waiting_channel_id") else None
+
+        # Сначала закрываем меню, и только потом пишем в канал и в лог: иначе
+        # ответ уходил после двух обращений к API и не всегда успевал вовремя.
+        await interaction.response.edit_message(
+            content=f"Заявитель <@{app['applicantId']}> вызван на обзвон в <#{selected_channel_id}>.",
+            view=None,
+        )
+
         if text_sendable(interaction.channel):
             await interaction.channel.send(
                 content=(
@@ -700,10 +720,6 @@ class CallSelectView(discord.ui.View):
             application=app,
             actor=interaction.user,
             extra_fields=[("Канал обзвона", f"<#{selected_channel_id}>", True)],
-        )
-        await interaction.response.edit_message(
-            content=f"Заявитель <@{app['applicantId']}> вызван на обзвон в <#{selected_channel_id}>.",
-            view=None,
         )
 
 
@@ -857,14 +873,31 @@ async def lock_application_channel_to_recruiter(guild: discord.Guild, applicatio
     if not recruiter_role_ids:
         return
 
-    applicant_id = int(application.get("applicantId") or 0)
     denied_overwrite = discord.PermissionOverwrite(
         view_channel=False, send_messages=False, read_message_history=False
     )
     allow_overwrite = discord.PermissionOverwrite(
         view_channel=True, send_messages=True, read_message_history=True
     )
+    reason = f"Application #{application.get('id')} locked to recruiter {claimed_by}"
 
+    # Доступ закрывается на уровне ролей, а не каждого участника отдельно.
+    # Прежний вариант делал по запросу к API на каждого рекрутера в канале:
+    # десяток рекрутеров превращался в десяток последовательных запросов,
+    # нажатие кнопки отвечало через десяток секунд и Discord успевал показать
+    # «Взаимодействие не удалось». Ролевых перезаписей всегда единицы, и они
+    # вдобавок действуют на тех, кто получит роль позже.
+    for role_id in sorted(recruiter_role_ids):
+        role = guild.get_role(int(role_id))
+        if role is None:
+            continue
+        try:
+            await channel.set_permissions(role, overwrite=denied_overwrite, reason=reason)
+        except Exception as error:
+            console_log(f"Failed to restrict role {role_id} on channel {channel.id}: {error!r}")
+
+    # Персональное разрешение перекрывает запрет роли, поэтому закрепивший
+    # заявку рекрутер сохраняет доступ.
     if claimant is not None:
         try:
             await channel.set_permissions(
@@ -872,23 +905,8 @@ async def lock_application_channel_to_recruiter(guild: discord.Guild, applicatio
                 overwrite=allow_overwrite,
                 reason=f"Application #{application.get('id')} claimed by recruiter",
             )
-        except Exception:
-            pass
-
-    for member in channel.members:
-        if member.bot or member.id in {applicant_id, claimed_by}:
-            continue
-        member_role_ids = {role.id for role in member.roles}
-        if recruiter_role_ids.isdisjoint(member_role_ids):
-            continue
-        try:
-            await channel.set_permissions(
-                member,
-                overwrite=denied_overwrite,
-                reason=f"Application #{application.get('id')} locked to recruiter {claimed_by}",
-            )
-        except Exception:
-            continue
+        except Exception as error:
+            console_log(f"Failed to grant claimant {claimed_by} on channel {channel.id}: {error!r}")
 
 
 # --- Подача заявки ---
@@ -964,7 +982,7 @@ async def submit_application(
         ),
         ephemeral=True,
     )
-    asyncio.create_task(
+    spawn_background_task(
         log_application_event(
             interaction.guild,
             title="Новая заявка",
@@ -1120,11 +1138,15 @@ async def post_result(
     if not text_sendable(channel):
         return
 
-    await channel.send(
-        content=f"<@{app['applicantId']}>",
-        embed=build_result_embed(app, recruiter_user_id, verdict, reject_reason),
-        allowed_mentions=discord.AllowedMentions(users=True),
-    )
+    try:
+        await channel.send(
+            content=f"<@{app['applicantId']}>",
+            embed=build_result_embed(app, recruiter_user_id, verdict, reject_reason),
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
+    except Exception as error:
+        # Канал итогов не должен обрывать выдачу ролей и удаление канала заявки.
+        console_log(f"Failed to post application result #{app.get('id')}: {error!r}")
 
 
 # --- Управление набором ---

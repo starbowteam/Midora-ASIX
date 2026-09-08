@@ -343,5 +343,213 @@ class LogBatchingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(count <= logs.LOG_EMBEDS_PER_MESSAGE for count in requests))
 
 
+class InteractionTimingTests(unittest.IsolatedAsyncioTestCase):
+    """Discord ждёт ответа на нажатие 3 секунды.
+
+    Если сначала ходить в API, а отвечать в конце, пользователь видит
+    «Взаимодействие не удалось», хотя действие потом всё-таки выполняется.
+    """
+
+    def setUp(self) -> None:
+        import applications_flow
+
+        self.module = applications_flow
+        self.calls: list[str] = []
+        self._patch(
+            "lock_application_channel_to_recruiter",
+            "refresh_application_message",
+            "disable_buttons",
+            "send_dm_or_fallback",
+            "post_result",
+            "log_application_event",
+            "can_manage_application",
+            "schedule_channel_deletion",
+            "text_sendable",
+        )
+
+    def _patch(self, *names: str) -> None:
+        """Возвращает подменённые атрибуты модуля после теста."""
+        for name in names:
+            original = getattr(self.module, name)
+            self.addCleanup(setattr, self.module, name, original)
+
+    def make_interaction(self):
+        calls = self.calls
+
+        class Response:
+            def is_done(self) -> bool:
+                return "defer" in calls
+
+            async def defer(self, **_kwargs) -> None:
+                calls.append("defer")
+
+            async def send_message(self, *_a, **_k) -> None:
+                calls.append("send_message")
+
+            async def send_modal(self, *_a, **_k) -> None:
+                calls.append("send_modal")
+
+        class Followup:
+            async def send(self, *_a, **_k) -> None:
+                calls.append("followup")
+
+        class Guild:
+            id = 1466147160763666472
+
+            def get_member(self, _user_id):
+                return None
+
+            def get_role(self, _role_id):
+                return None
+
+        class User:
+            id = 555
+            roles: list = []
+
+        class Channel:
+            id = 4242
+
+            async def send(self, *_a, **_k) -> None:
+                calls.append("channel_message")
+
+        class Interaction:
+            id = 1
+            guild = Guild()
+            user = User()
+            channel = Channel()
+            response = Response()
+            followup = Followup()
+
+        return Interaction()
+
+    async def test_accept_defers_before_touching_discord_api(self) -> None:
+        calls = self.calls
+        application = {
+            "id": 77,
+            "server": "denver",
+            "applicantId": 1,
+            "guildId": 1466147160763666472,
+            "channelId": 4242,
+            "status": "pending",
+            "claimedBy": 0,
+            "submittedAt": "2026-08-22T10:00:00+00:00",
+        }
+        self.module.application_store.setdefault("items", {})["77"] = application
+
+        async def fake_lock(*_a, **_k):
+            calls.append("lock_channel")
+
+        async def noop(*_a, **_k):
+            calls.append("api_call")
+
+        self.module.lock_application_channel_to_recruiter = fake_lock
+        self.module.disable_buttons = noop
+        self.module.send_dm_or_fallback = noop
+        self.module.post_result = noop
+        self.module.log_application_event = noop
+        self.module.can_manage_application = lambda *_a, **_k: True
+        self.module.schedule_channel_deletion = lambda *_a, **_k: calls.append("schedule_delete")
+
+        card = self.module.ApplicationCard(application, "tester")
+        await card.accept_callback(self.make_interaction())
+
+        self.assertIn("defer", calls, "ответ должен быть отложен")
+        self.assertEqual(calls[0], "defer", "defer обязан быть самым первым действием")
+        self.assertLess(
+            calls.index("defer"),
+            calls.index("lock_channel"),
+            "обращения к API должны идти только после defer",
+        )
+        self.assertIn("schedule_delete", calls, "канал заявки должен ставиться на удаление")
+
+    async def test_review_defers_before_touching_discord_api(self) -> None:
+        calls = self.calls
+        application = {
+            "id": 78,
+            "server": "denver",
+            "applicantId": 1,
+            "guildId": 1466147160763666472,
+            "channelId": 4243,
+            "status": "pending",
+            "claimedBy": 0,
+            "submittedAt": "2026-08-22T10:00:00+00:00",
+        }
+        self.module.application_store.setdefault("items", {})["78"] = application
+
+        async def fake_lock(*_a, **_k):
+            calls.append("lock_channel")
+
+        async def noop(*_a, **_k):
+            calls.append("api_call")
+
+        self.module.lock_application_channel_to_recruiter = fake_lock
+        self.module.refresh_application_message = noop
+        self.module.log_application_event = noop
+        self.module.can_manage_application = lambda *_a, **_k: True
+        self.module.text_sendable = lambda _channel: True
+
+        card = self.module.ApplicationCard(application, "tester")
+        await card.review_callback(self.make_interaction())
+
+        self.assertEqual(calls[0], "defer")
+        self.assertLess(calls.index("defer"), calls.index("lock_channel"))
+
+
+class ChannelLockingTests(unittest.IsolatedAsyncioTestCase):
+    """Закрытие канала заявки не должно масштабироваться числом рекрутеров."""
+
+    async def test_locking_uses_role_overwrites_not_per_member(self) -> None:
+        import applications_flow
+
+        permission_calls: list[str] = []
+
+        class Role:
+            def __init__(self, role_id: int) -> None:
+                self.id = role_id
+
+        class Member:
+            def __init__(self, member_id: int) -> None:
+                self.id = member_id
+                self.bot = False
+                self.roles = [Role(1485562379512315996)]
+
+        class Channel:
+            id = 4242
+            # Двадцать рекрутеров в канале: раньше это означало двадцать запросов.
+            members = [Member(1000 + index) for index in range(20)]
+
+            async def set_permissions(self, target, **_kwargs) -> None:
+                permission_calls.append(type(target).__name__)
+
+        channel = Channel()
+
+        class Guild:
+            id = 1466147160763666472
+
+            def get_channel(self, _channel_id):
+                return channel
+
+            def get_member(self, member_id):
+                return Member(member_id)
+
+            def get_role(self, role_id):
+                return Role(role_id)
+
+        original_text_sendable = applications_flow.text_sendable
+        self.addCleanup(setattr, applications_flow, "text_sendable", original_text_sendable)
+        applications_flow.text_sendable = lambda _channel: True
+        await applications_flow.lock_application_channel_to_recruiter(
+            Guild(),
+            {"id": 5, "channelId": 4242, "claimedBy": 777, "applicantId": 1, "server": "denver", "guildId": 1},
+        )
+
+        self.assertLessEqual(
+            len(permission_calls),
+            8,
+            f"ожидались единицы запросов на роли, а не по одному на участника: {len(permission_calls)}",
+        )
+        self.assertIn("Member", permission_calls, "закрепивший рекрутер должен сохранить доступ")
+
+
 if __name__ == "__main__":
     unittest.main()

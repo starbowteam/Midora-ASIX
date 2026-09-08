@@ -11,6 +11,32 @@ from formatting import text_sendable
 from projects import get_project
 
 
+# Ссылки на фоновые задачи. asyncio держит только слабую ссылку на задачу, и
+# без этого множества сборщик мусора может убить её прямо во время ожидания —
+# именно так терялось отложенное удаление канала заявки.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def spawn_background_task(coro, *, name: str = "") -> asyncio.Task | None:
+    try:
+        task = asyncio.create_task(coro, name=name or None)
+    except RuntimeError:
+        coro.close()
+        return None
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    task.add_done_callback(_report_background_failure)
+    return task
+
+
+def _report_background_failure(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        console_log(f"Background task {task.get_name()} failed: {error!r}")
+
+
 async def cleanup_bot_messages(channel: discord.TextChannel, limit: int = 200) -> None:
     try:
         if bot.user is None:
@@ -59,10 +85,18 @@ async def delete_channel_now(channel_id: int, reason: str) -> bool:
 
 async def delete_channel_later(channel_id: int, reason: str) -> None:
     await asyncio.sleep(4)
-    for _attempt in range(8):
+    for attempt in range(8):
         if await delete_channel_now(channel_id, reason):
             return
-        await asyncio.sleep(3)
+        await asyncio.sleep(3 * (attempt + 1))
+    console_log(f"Gave up deleting channel {channel_id} after 8 attempts: {reason}")
+
+
+def schedule_channel_deletion(channel_id: int, reason: str) -> None:
+    """Ставит удаление канала в фон, сохраняя ссылку на задачу."""
+    if channel_id <= 0:
+        return
+    spawn_background_task(delete_channel_later(channel_id, reason), name=f"delete-channel-{channel_id}")
 
 
 async def ensure_guild_members_loaded(guild: discord.Guild) -> None:
@@ -81,7 +115,15 @@ async def send_dm_or_fallback(
 ) -> None:
     """Пробует ЛС, а при закрытых личных сообщениях пишет в запасной канал."""
     member = guild.get_member(user_id)
-    user: discord.abc.User = member if member is not None else await bot.fetch_user(user_id)
+    user: discord.abc.User | None = member
+    if user is None:
+        # Раньше неудачный fetch_user выбрасывал исключение прямо в обработчик
+        # кнопки и обрывал всё, что шло следом, — включая удаление канала заявки.
+        try:
+            user = await bot.fetch_user(user_id)
+        except Exception as error:
+            console_log(f"Failed to resolve user {user_id} for a direct message: {error!r}")
+            return
 
     # file=None discord.py принимает за настоящее вложение и падает,
     # поэтому параметр передаётся только когда файл действительно есть.
