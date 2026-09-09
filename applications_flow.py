@@ -30,6 +30,7 @@ from embeds import (
     build_result_embed,
 )
 from formatting import format_log_time_msk, parse_iso, text_sendable, trim_text
+from interactions import LoggedErrorsMixin, ack_interaction
 from logs import send_application_log
 from projects import (
     can_manage_application,
@@ -83,7 +84,7 @@ def is_privileged_recruiter(member: discord.Member | None) -> bool:
 
 # --- Карточки Components V2 ---
 
-class ApplicationPanelCard(discord.ui.LayoutView):
+class ApplicationPanelCard(LoggedErrorsMixin, discord.ui.LayoutView):
     """Цельная карточка подачи заявок в канале панели."""
 
     def __init__(self, guild_id: int, guild: discord.Guild | None = None):
@@ -135,7 +136,7 @@ class ApplicationPanelCard(discord.ui.LayoutView):
         await show_application_modal(interaction, options[0]["key"], self.guild_id)
 
 
-class ApplicationCard(discord.ui.LayoutView):
+class ApplicationCard(LoggedErrorsMixin, discord.ui.LayoutView):
     """Карточка заявки в её канале — в том же стиле, что и панель подачи.
 
     Components V2-сообщение не может нести ``content``, поэтому упоминания
@@ -274,7 +275,8 @@ class ApplicationCard(discord.ui.LayoutView):
         # Discord ждёт ответа на нажатие 3 секунды, иначе показывает
         # «Взаимодействие не удалось». Дальше идут запросы к API, которые в
         # этот лимит не укладываются, поэтому ответ откладываем сразу.
-        await interaction.response.defer(ephemeral=True)
+        if not await ack_interaction(interaction, label=f"review#{self.app_id}"):
+            return
         app = await self._guard(interaction)
         if app is None:
             return
@@ -302,7 +304,8 @@ class ApplicationCard(discord.ui.LayoutView):
         await interaction.followup.send(f"Заявка #{self.app_id} закреплена за вами.", ephemeral=True)
 
     async def call_callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
+        if not await ack_interaction(interaction, label=f"call#{self.app_id}"):
+            return
         app = await self._guard(interaction)
         if app is None:
             return
@@ -331,7 +334,8 @@ class ApplicationCard(discord.ui.LayoutView):
         # проверок и записи на диск, и при малейшей загрузке процесса не успевал
         # в трёхсекундный лимит — взаимодействие падало, а вместе с ним
         # пропадали выдача ролей и удаление канала заявки.
-        await interaction.response.defer(ephemeral=True)
+        if not await ack_interaction(interaction, label=f"accept#{self.app_id}"):
+            return
         app = await self._guard(interaction)
         if app is None:
             return
@@ -498,7 +502,7 @@ async def show_application_modal(interaction: discord.Interaction, server: str, 
     await interaction.response.send_modal(ApplicationModal(server))
 
 
-class ApplicationModal(discord.ui.Modal):
+class ApplicationModal(LoggedErrorsMixin, discord.ui.Modal):
     def __init__(self, server: str):
         super().__init__(title=f"Заявка — {get_server_plain_label(server)}", timeout=None)
         self.server = server
@@ -531,7 +535,7 @@ class ApplicationModal(discord.ui.Modal):
         )
 
 
-class FriendVerificationModal(discord.ui.Modal):
+class FriendVerificationModal(LoggedErrorsMixin, discord.ui.Modal):
     def __init__(self):
         super().__init__(title="Верификация для друзей", timeout=None)
         self.friend_name_game = discord.ui.TextInput(
@@ -554,7 +558,7 @@ class FriendVerificationModal(discord.ui.Modal):
         )
 
 
-class RejectModal(discord.ui.Modal):
+class RejectModal(LoggedErrorsMixin, discord.ui.Modal):
     def __init__(self, app_id: int):
         super().__init__(title="Отклонить заявку", timeout=None)
         self.app_id = app_id
@@ -569,7 +573,8 @@ class RejectModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         # Отклонение делает столько же обращений к API, сколько и принятие,
         # поэтому ответ откладывается до всей остальной работы.
-        await interaction.response.defer(ephemeral=True)
+        if not await ack_interaction(interaction, label=f"reject#{self.app_id}"):
+            return
         member = interaction.user if isinstance(interaction.user, discord.Member) else None
         app = application_store.get("items", {}).get(str(self.app_id))
         if not app:
@@ -646,7 +651,7 @@ class RejectModal(discord.ui.Modal):
         schedule_channel_deletion(int(app.get("channelId") or 0), "Заявка FAMQ отклонена")
 
 
-class CallSelectView(discord.ui.View):
+class CallSelectView(LoggedErrorsMixin, discord.ui.View):
     def __init__(self, app_id: int, interview_channel_ids: list[int]):
         super().__init__(timeout=180)
         self.app_id = app_id

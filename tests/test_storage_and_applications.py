@@ -551,5 +551,60 @@ class ChannelLockingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Member", permission_calls, "закрепивший рекрутер должен сохранить доступ")
 
 
+class InteractionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+    """Просроченные и упавшие взаимодействия должны быть видны в логе."""
+
+    async def test_expired_interaction_is_reported_and_stops_handler(self) -> None:
+        import discord
+
+        import interactions
+
+        messages: list[str] = []
+        original_log = interactions.console_log
+        self.addCleanup(setattr, interactions, "console_log", original_log)
+        interactions.console_log = messages.append
+
+        class Response:
+            def is_done(self) -> bool:
+                return False
+
+            async def defer(self, **_kwargs):
+                raise discord.NotFound(_FakeResponse(), "Unknown interaction")
+
+        class Interaction:
+            response = Response()
+
+        acknowledged = await interactions.ack_interaction(Interaction(), label="review#1")
+
+        self.assertFalse(acknowledged, "обработчик обязан остановиться на истёкшем взаимодействии")
+        self.assertTrue(any("expired" in text for text in messages), messages)
+
+    async def test_slow_acknowledgement_is_flagged(self) -> None:
+        import interactions
+
+        messages: list[str] = []
+        original_log = interactions.console_log
+        self.addCleanup(setattr, interactions, "console_log", original_log)
+        interactions.console_log = messages.append
+
+        class Response:
+            def is_done(self) -> bool:
+                return False
+
+            async def defer(self, **_kwargs):
+                await asyncio.sleep(interactions.SLOW_ACK_SECONDS + 0.05)
+
+        class Interaction:
+            response = Response()
+
+        self.assertTrue(await interactions.ack_interaction(Interaction(), label="accept#1"))
+        self.assertTrue(any("slowly" in text for text in messages), messages)
+
+
+class _FakeResponse:
+    status = 404
+    reason = "Not Found"
+
+
 if __name__ == "__main__":
     unittest.main()

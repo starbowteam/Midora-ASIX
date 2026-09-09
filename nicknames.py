@@ -30,6 +30,11 @@ STAFF_ROLE_GROUPS = (
 
 # Первый подходящий префикс — приоритетный. Это предотвращает неверный формат
 # у участников, у которых одновременно несколько ролей.
+# Ограничители рассылки напоминаний о никах: она идёт в фоне и не должна
+# съедать лимит запросов, от которого зависит отклик кнопок.
+NICKNAME_DM_DELAY_SECONDS = 1.5
+NICKNAME_DM_LIMIT_PER_RUN = 25
+
 NICKNAME_RULES: tuple[tuple[int, str], ...] = (
     (CHIEF_RECRUIT_ROLE_ID, "Chief Rec"),
     (DEP_CHIEF_RECRUIT_ROLE_ID, "Dcr"),
@@ -194,6 +199,13 @@ async def send_nickname_fix_dms(guild: discord.Guild, bad_members: list[tuple[di
 
     sent_count = 0
     for member, prefix in bad_members:
+        if sent_count >= NICKNAME_DM_LIMIT_PER_RUN:
+            console_log(
+                f"Nickname DM limit reached ({NICKNAME_DM_LIMIT_PER_RUN}); "
+                f"остальные {len(bad_members) - sent_count} участников получат напоминание позже"
+            )
+            break
+
         user_id = str(member.id)
         if state.get(user_id) == prefix:
             continue
@@ -206,6 +218,11 @@ async def send_nickname_fix_dms(guild: discord.Guild, bad_members: list[tuple[di
         state[user_id] = prefix
         changed = True
         sent_count += 1
+        # Создание личного канала — один из самых жёстко ограниченных запросов
+        # Discord. Рассылка идёт в фоне, поэтому спокойно растягиваем её во
+        # времени: иначе очередь запросов упирается в общий лимит и нажатия
+        # кнопок перестают укладываться в отведённые три секунды.
+        await asyncio.sleep(NICKNAME_DM_DELAY_SECONDS)
 
     if changed:
         save_panels()
